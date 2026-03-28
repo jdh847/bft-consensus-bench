@@ -33,8 +33,8 @@ PBFT's O(n²) message complexity is the cost of tolerating Byzantine (arbitrary)
 - [x] Cluster orchestrator (step-based simulation)
 - [x] Fault injection (node isolation, network partitions, message drops)
 - [x] Benchmark suite with throughput comparison
-- [ ] PBFT view change on leader failure
-- [ ] Raft log conflict resolution edge cases
+- [x] PBFT view change on leader failure
+- [x] Raft leader re-election and follower catch-up after partition heal
 - [ ] Charts and visualisation
 
 ## Structure
@@ -59,7 +59,7 @@ src/
 ## Build & run
 
 ```
-cargo test                         # 19 tests (unit + integration)
+cargo test                         # 23 tests (unit + integration)
 cargo run                          # cluster config summary
 cargo run --release --bin bench_report  # benchmark comparison
 cargo bench                        # criterion benchmarks

@@ -49,9 +49,13 @@ pub enum PbftMessage {
     ViewChange {
         new_view: ViewNumber,
         replica: NodeId,
+        /// Highest sequence committed by this replica before requesting view change.
+        last_committed_seq: SequenceNumber,
     },
     NewView {
         view: ViewNumber,
+        /// The new primary's next sequence number, so replicas can sync.
+        next_sequence: SequenceNumber,
     },
 }
 

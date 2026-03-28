@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -10,6 +10,8 @@ use super::{Phase, SlotState};
 use crate::consensus::{CommittedEntry, ConsensusNode, ProposeResult};
 use crate::network::{NetworkMessage, PbftMessage, ProtocolMessage};
 use crate::types::{NodeId, Payload, SequenceNumber, ViewNumber};
+
+const VIEW_CHANGE_TIMEOUT: u64 = 40;
 
 pub struct PbftNode {
     id: NodeId,
@@ -25,6 +27,18 @@ struct PbftState {
     slots: HashMap<SequenceNumber, SlotState>,
     pending_payloads: HashMap<SequenceNumber, Payload>,
     committed: Vec<CommittedEntry>,
+
+    // View change state
+    /// Ticks remaining before this node suspects the primary and starts view change.
+    view_change_timeout: u64,
+    /// Whether we've sent a ViewChange for the next view already.
+    view_change_in_progress: bool,
+    /// ViewChange messages collected for each proposed new view.
+    view_change_votes: HashMap<ViewNumber, HashSet<NodeId>>,
+    /// Highest committed sequence number (used in ViewChange messages).
+    highest_committed_seq: SequenceNumber,
+    /// Whether the current primary has shown activity this timeout period.
+    primary_active: bool,
 }
 
 impl PbftNode {
@@ -45,6 +59,11 @@ impl PbftNode {
                 slots: HashMap::new(),
                 pending_payloads: HashMap::new(),
                 committed: Vec::new(),
+                view_change_timeout: VIEW_CHANGE_TIMEOUT,
+                view_change_in_progress: false,
+                view_change_votes: HashMap::new(),
+                highest_committed_seq: 0,
+                primary_active: false,
             })),
         }
     }
@@ -53,19 +72,16 @@ impl PbftNode {
         NodeId(view % self.cluster_size as u64)
     }
 
-    /// Quorum size: 2f + 1 where f = floor((n-1)/3)
     fn quorum(&self) -> usize {
         let f = (self.cluster_size - 1) / 3;
         2 * f + 1
     }
 
-    /// Prepares needed: 2f (not counting the pre-prepare itself)
     fn prepare_threshold(&self) -> usize {
         let f = (self.cluster_size - 1) / 3;
         2 * f
     }
 
-    /// Build a message from self to a target.
     fn msg_to(&self, to: NodeId, payload: ProtocolMessage) -> NetworkMessage {
         NetworkMessage {
             from: self.id,
@@ -74,12 +90,21 @@ impl PbftNode {
         }
     }
 
-    /// Broadcast a PBFT message to all peers.
     fn broadcast_pbft(&self, pbft_msg: PbftMessage) -> Vec<NetworkMessage> {
         self.peer_ids
             .iter()
             .map(|&peer| self.msg_to(peer, ProtocolMessage::Pbft(pbft_msg.clone())))
             .collect()
+    }
+
+    fn enter_new_view(state: &mut PbftState, new_view: ViewNumber) {
+        state.view = new_view;
+        state.view_change_in_progress = false;
+        state.view_change_timeout = VIEW_CHANGE_TIMEOUT;
+        state.primary_active = false;
+        // Keep committed slots but clear pending consensus slots
+        state.slots.retain(|_, slot| slot.phase == Phase::Committed);
+        state.pending_payloads.clear();
     }
 }
 
@@ -109,6 +134,10 @@ impl ConsensusNode for PbftNode {
             return (ProposeResult::NotLeader(Some(primary)), vec![]);
         }
 
+        if state.view_change_in_progress {
+            return (ProposeResult::NotLeader(None), vec![]);
+        }
+
         let seq = state.next_sequence;
         state.next_sequence += 1;
         let view = state.view;
@@ -119,9 +148,8 @@ impl ConsensusNode for PbftNode {
         state.slots.insert(seq, slot);
         state.pending_payloads.insert(seq, payload.clone());
 
-        debug!(node = %self.id, seq, view, "primary assigned sequence, broadcasting pre-prepare + prepare");
+        debug!(node = %self.id, seq, view, "primary assigned sequence");
 
-        // Broadcast pre-prepare to all replicas
         let mut outgoing = self.broadcast_pbft(PbftMessage::PrePrepare {
             view,
             sequence: seq,
@@ -129,8 +157,6 @@ impl ConsensusNode for PbftNode {
             payload,
         });
 
-        // Primary also broadcasts its own Prepare (per PBFT spec,
-        // the primary participates in the prepare phase too)
         outgoing.extend(self.broadcast_pbft(PbftMessage::Prepare {
             view,
             sequence: seq,
@@ -159,9 +185,13 @@ impl ConsensusNode for PbftNode {
                 digest,
                 payload,
             } => {
-                if view != state.view {
+                if view != state.view || state.view_change_in_progress {
                     return vec![];
                 }
+
+                // Primary is active — reset view change timer
+                state.primary_active = true;
+                state.view_change_timeout = VIEW_CHANGE_TIMEOUT;
 
                 let mut slot = SlotState::new(view, sequence);
                 slot.phase = Phase::PrePrepared;
@@ -170,7 +200,6 @@ impl ConsensusNode for PbftNode {
 
                 debug!(node = %self.id, seq = sequence, "received pre-prepare, broadcasting prepare");
 
-                // Respond with prepare to all peers
                 self.broadcast_pbft(PbftMessage::Prepare {
                     view,
                     sequence,
@@ -195,15 +224,13 @@ impl ConsensusNode for PbftNode {
 
                         if slot.prepare_count >= self.prepare_threshold() {
                             slot.phase = Phase::Prepared;
-                            // Count our own commit
-                            slot.commit_count = 1;
+                            slot.commit_count = 1; // count own commit
                             debug!(
                                 node = %self.id, seq = sequence,
                                 prepares = slot.prepare_count,
                                 "reached prepare threshold, broadcasting commit"
                             );
 
-                            // Broadcast commit
                             return self.broadcast_pbft(PbftMessage::Commit {
                                 view,
                                 sequence,
@@ -227,13 +254,14 @@ impl ConsensusNode for PbftNode {
                 }
 
                 if let Some(slot) = state.slots.get_mut(&sequence) {
-                    // Accept commits in both Prepared and PrePrepared phases
-                    // (commits can arrive before we've collected enough prepares)
                     if slot.phase == Phase::Prepared || slot.phase == Phase::PrePrepared {
                         slot.commit_count += 1;
 
                         if slot.commit_count >= self.quorum() && slot.phase != Phase::Committed {
                             slot.phase = Phase::Committed;
+                            if sequence > state.highest_committed_seq {
+                                state.highest_committed_seq = sequence;
+                            }
                             debug!(node = %self.id, seq = sequence, "committed");
 
                             if let Some(payload) = state.pending_payloads.remove(&sequence) {
@@ -248,17 +276,128 @@ impl ConsensusNode for PbftNode {
                 vec![]
             }
 
-            PbftMessage::ViewChange { .. } | PbftMessage::NewView { .. } => {
-                // View change — will implement next
-                debug!(node = %self.id, "view change not yet implemented");
+            PbftMessage::ViewChange {
+                new_view,
+                replica,
+                last_committed_seq: _,
+            } => {
+                if new_view <= state.view {
+                    return vec![];
+                }
+
+                let votes = state.view_change_votes
+                    .entry(new_view)
+                    .or_insert_with(HashSet::new);
+                votes.insert(replica);
+
+                let vote_count = votes.len();
+                debug!(
+                    node = %self.id, new_view,
+                    votes = vote_count, needed = self.quorum(),
+                    "received view-change vote from {}", replica
+                );
+
+                // If we haven't voted yet for this view, join the view change
+                if !votes.contains(&self.id) {
+                    votes.insert(self.id);
+                    let mut outgoing = self.broadcast_pbft(PbftMessage::ViewChange {
+                        new_view,
+                        replica: self.id,
+                        last_committed_seq: state.highest_committed_seq,
+                    });
+
+                    // Re-check after adding our own vote
+                    let votes = state.view_change_votes.get(&new_view).unwrap();
+                    if votes.len() >= self.quorum() && self.primary_for_view(new_view) == self.id {
+                        debug!(node = %self.id, new_view, "I am new primary, broadcasting NewView");
+                        Self::enter_new_view(&mut state, new_view);
+                        self.current_view.store(new_view, Ordering::Relaxed);
+                        state.next_sequence = state.highest_committed_seq + 1;
+
+                        outgoing.extend(self.broadcast_pbft(PbftMessage::NewView {
+                            view: new_view,
+                            next_sequence: state.next_sequence,
+                        }));
+                    }
+
+                    return outgoing;
+                }
+
+                // Check if we have quorum and we're the new primary
+                if vote_count >= self.quorum() && self.primary_for_view(new_view) == self.id {
+                    debug!(node = %self.id, new_view, "quorum reached, I am new primary");
+                    Self::enter_new_view(&mut state, new_view);
+                    self.current_view.store(new_view, Ordering::Relaxed);
+                    state.next_sequence = state.highest_committed_seq + 1;
+
+                    return self.broadcast_pbft(PbftMessage::NewView {
+                        view: new_view,
+                        next_sequence: state.next_sequence,
+                    });
+                }
+
+                vec![]
+            }
+
+            PbftMessage::NewView {
+                view: new_view,
+                next_sequence,
+            } => {
+                if new_view <= state.view {
+                    return vec![];
+                }
+
+                debug!(
+                    node = %self.id, new_view, next_sequence,
+                    "received NewView, transitioning"
+                );
+
+                Self::enter_new_view(&mut state, new_view);
+                self.current_view.store(new_view, Ordering::Relaxed);
+                state.next_sequence = next_sequence;
+
                 vec![]
             }
         }
     }
 
     async fn tick(&self) -> Vec<NetworkMessage> {
-        // PBFT doesn't have periodic ticks (no heartbeat).
-        // View change timeout will go here.
+        let mut state = self.state.lock().await;
+
+        // Primary doesn't need to monitor itself
+        if self.primary_for_view(state.view) == self.id {
+            return vec![];
+        }
+
+        // Already in a view change
+        if state.view_change_in_progress {
+            return vec![];
+        }
+
+        if state.view_change_timeout == 0 {
+            // Timeout — suspect the primary
+            let new_view = state.view + 1;
+            state.view_change_in_progress = true;
+
+            debug!(
+                node = %self.id, current_view = state.view, new_view,
+                "view change timeout, suspecting primary {}", self.primary_for_view(state.view)
+            );
+
+            // Vote for ourselves
+            let votes = state.view_change_votes
+                .entry(new_view)
+                .or_insert_with(HashSet::new);
+            votes.insert(self.id);
+
+            return self.broadcast_pbft(PbftMessage::ViewChange {
+                new_view,
+                replica: self.id,
+                last_committed_seq: state.highest_committed_seq,
+            });
+        }
+
+        state.view_change_timeout -= 1;
         vec![]
     }
 
@@ -284,7 +423,7 @@ mod tests {
 
         let (result, outgoing) = node.propose(payload).await;
         assert_eq!(result, ProposeResult::Accepted);
-        // Should broadcast pre-prepare (3) + prepare (3) to peers
+        // pre-prepare (3) + prepare (3)
         assert_eq!(outgoing.len(), 6);
     }
 
@@ -316,7 +455,6 @@ mod tests {
         };
 
         let outgoing = node.handle_message(msg).await;
-        // Should broadcast prepare to 3 peers
         assert_eq!(outgoing.len(), 3);
     }
 
@@ -329,5 +467,20 @@ mod tests {
         let node = PbftNode::new(NodeId(0), 7);
         assert_eq!(node.quorum(), 5);
         assert_eq!(node.fault_tolerance(), 2);
+    }
+
+    #[tokio::test]
+    async fn tick_triggers_view_change_on_timeout() {
+        let node = PbftNode::new(NodeId(1), 4);
+
+        // Tick until timeout expires
+        let mut total_outgoing = vec![];
+        for _ in 0..=VIEW_CHANGE_TIMEOUT {
+            let out = node.tick().await;
+            total_outgoing.extend(out);
+        }
+
+        // Should have broadcast ViewChange messages to 3 peers
+        assert_eq!(total_outgoing.len(), 3, "should broadcast ViewChange to all peers");
     }
 }

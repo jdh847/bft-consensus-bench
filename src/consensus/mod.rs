@@ -24,9 +24,9 @@ pub struct CommittedEntry {
 
 /// The core trait every consensus implementation must satisfy.
 ///
-/// The benchmark harness programs against this trait, so PBFT and Raft
-/// can be compared on identical workloads without protocol-specific code
-/// leaking into the measurement layer.
+/// Methods return `Vec<NetworkMessage>` — the outgoing messages the
+/// node wants to send. The cluster orchestrator is responsible for
+/// actually delivering them via the network.
 #[async_trait]
 pub trait ConsensusNode: Send + Sync {
     /// Unique identifier for this node.
@@ -38,16 +38,22 @@ pub trait ConsensusNode: Send + Sync {
     /// Maximum number of faulty nodes this configuration tolerates.
     fn fault_tolerance(&self) -> usize;
 
-    /// Propose a client payload for consensus. Returns immediately —
-    /// the caller should await commitment via `poll_committed`.
-    async fn propose(&self, payload: Payload) -> ProposeResult;
+    /// All node IDs in the cluster (needed for broadcasting).
+    fn peers(&self) -> Vec<NodeId>;
 
-    /// Handle an incoming protocol message from another node.
-    async fn handle_message(&self, msg: NetworkMessage);
+    /// Propose a client payload for consensus. Returns the result
+    /// and any outgoing protocol messages to broadcast.
+    async fn propose(&self, payload: Payload) -> (ProposeResult, Vec<NetworkMessage>);
 
-    /// Drain committed entries since the last call. Returns entries
-    /// in sequence order. Non-blocking — returns empty vec if nothing
-    /// new has been committed.
+    /// Handle an incoming protocol message. Returns outgoing messages
+    /// to send in response.
+    async fn handle_message(&self, msg: NetworkMessage) -> Vec<NetworkMessage>;
+
+    /// Periodic tick for time-driven events (election timeouts,
+    /// heartbeats). Returns outgoing messages if any.
+    async fn tick(&self) -> Vec<NetworkMessage>;
+
+    /// Drain committed entries since the last call.
     async fn poll_committed(&self) -> Vec<CommittedEntry>;
 
     /// Current leader, if known.

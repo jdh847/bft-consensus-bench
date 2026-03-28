@@ -26,7 +26,7 @@ fn bench_raft_propose(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let node = RaftNode::new(NodeId(0), 3);
-                // Force leader role for the benchmark
+                node.force_leader().await;
                 let payload = Payload::new(b"benchmark-payload".to_vec());
                 node.propose(payload).await
             })

@@ -90,23 +90,33 @@ impl Cluster {
     }
 
     pub async fn propose(&mut self, payload: Payload) -> ProposeResult {
-        let (result, outgoing) = self.nodes[0].propose(payload.clone()).await;
+        // Try each node until one accepts (handles leader changes).
+        // Skip isolated nodes — a real client can't reach them.
+        for i in 0..self.nodes.len() {
+            if self.faults.is_isolated(self.nodes[i].id()) {
+                continue;
+            }
+            let (result, outgoing) = self.nodes[i].propose(payload.clone()).await;
 
-        match &result {
-            ProposeResult::Accepted => {
-                self.enqueue(outgoing);
-            }
-            ProposeResult::NotLeader(Some(leader)) => {
-                if let Some(node) = self.find_node(*leader) {
-                    let (r, out) = node.propose(payload).await;
-                    self.enqueue(out);
-                    return r;
+            match &result {
+                ProposeResult::Accepted => {
+                    self.enqueue(outgoing);
+                    return ProposeResult::Accepted;
                 }
+                ProposeResult::NotLeader(Some(leader)) => {
+                    // Try the suggested leader
+                    let leader_idx = self.nodes.iter().position(|n| n.id() == *leader);
+                    if let Some(idx) = leader_idx {
+                        let (r, out) = self.nodes[idx].propose(payload).await;
+                        self.enqueue(out);
+                        return r;
+                    }
+                }
+                _ => continue,
             }
-            _ => {}
         }
 
-        result
+        ProposeResult::NotLeader(None)
     }
 
     pub async fn step(&mut self) {
@@ -169,7 +179,7 @@ impl Cluster {
             self.run_to_completion(100).await;
 
             for node in &self.nodes {
-                if node.is_leader() {
+                if node.is_leader() && !self.faults.is_isolated(node.id()) {
                     return Some(node.id());
                 }
             }
@@ -179,10 +189,6 @@ impl Cluster {
 
     pub fn size(&self) -> usize {
         self.nodes.len()
-    }
-
-    fn find_node(&self, id: NodeId) -> Option<&Arc<dyn ConsensusNode>> {
-        self.nodes.iter().find(|n| n.id() == id)
     }
 
     fn enqueue(&mut self, messages: Vec<NetworkMessage>) {

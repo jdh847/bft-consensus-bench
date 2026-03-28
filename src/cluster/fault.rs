@@ -51,6 +51,11 @@ impl FaultConfig {
         self
     }
 
+    /// Returns true if a node is completely isolated from the network.
+    pub fn is_isolated(&self, node: NodeId) -> bool {
+        self.isolated_nodes.contains(&node)
+    }
+
     /// Returns true if this message should be delivered.
     pub fn should_deliver(&self, msg: &NetworkMessage) -> bool {
         // Isolated nodes can't send or receive

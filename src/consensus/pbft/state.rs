@@ -119,15 +119,24 @@ impl ConsensusNode for PbftNode {
         state.slots.insert(seq, slot);
         state.pending_payloads.insert(seq, payload.clone());
 
-        debug!(node = %self.id, seq, view, "primary assigned sequence, broadcasting pre-prepare");
+        debug!(node = %self.id, seq, view, "primary assigned sequence, broadcasting pre-prepare + prepare");
 
         // Broadcast pre-prepare to all replicas
-        let outgoing = self.broadcast_pbft(PbftMessage::PrePrepare {
+        let mut outgoing = self.broadcast_pbft(PbftMessage::PrePrepare {
             view,
             sequence: seq,
             digest,
             payload,
         });
+
+        // Primary also broadcasts its own Prepare (per PBFT spec,
+        // the primary participates in the prepare phase too)
+        outgoing.extend(self.broadcast_pbft(PbftMessage::Prepare {
+            view,
+            sequence: seq,
+            digest,
+            replica: self.id,
+        }));
 
         (ProposeResult::Accepted, outgoing)
     }
@@ -186,6 +195,8 @@ impl ConsensusNode for PbftNode {
 
                         if slot.prepare_count >= self.prepare_threshold() {
                             slot.phase = Phase::Prepared;
+                            // Count our own commit
+                            slot.commit_count = 1;
                             debug!(
                                 node = %self.id, seq = sequence,
                                 prepares = slot.prepare_count,
@@ -273,8 +284,8 @@ mod tests {
 
         let (result, outgoing) = node.propose(payload).await;
         assert_eq!(result, ProposeResult::Accepted);
-        // Should broadcast pre-prepare to 3 peers
-        assert_eq!(outgoing.len(), 3);
+        // Should broadcast pre-prepare (3) + prepare (3) to peers
+        assert_eq!(outgoing.len(), 6);
     }
 
     #[tokio::test]

@@ -173,3 +173,122 @@ async fn cluster_stats_track_dropped_messages() {
         cluster.stats.messages_delivered + cluster.stats.messages_dropped
     );
 }
+
+// ── View change / leader recovery ─────────────────────────────
+
+#[tokio::test]
+async fn pbft_view_change_after_primary_isolated() {
+    // n=4: commit a value, then isolate primary (node 0),
+    // tick until view change happens, then commit with new primary (node 1)
+    let mut cluster = Cluster::new_pbft(4);
+
+    // First: commit normally with the original primary
+    let result = cluster.propose(Payload::new(b"before-crash")).await;
+    assert_eq!(result, ProposeResult::Accepted);
+    cluster.run_to_completion(30).await;
+
+    let committed = cluster.collect_committed().await;
+    assert!(!committed.is_empty(), "should commit before primary failure");
+
+    // Now isolate the primary
+    cluster.set_faults(FaultConfig::new().with_isolated(NodeId(0)));
+
+    // Tick until view change completes — replicas will timeout,
+    // broadcast ViewChange, and node 1 becomes new primary
+    for _ in 0..100 {
+        cluster.tick().await;
+        cluster.run_to_completion(50).await;
+    }
+
+    // Try to propose to the new primary
+    let result = cluster.propose(Payload::new(b"after-view-change")).await;
+    assert_eq!(result, ProposeResult::Accepted, "new primary should accept proposals");
+
+    cluster.run_to_completion(50).await;
+
+    let committed = cluster.collect_committed().await;
+    assert!(
+        !committed.is_empty(),
+        "should commit after view change with new primary"
+    );
+}
+
+#[tokio::test]
+async fn raft_reelection_after_leader_crash() {
+    // n=5: bootstrap leader, commit a value, isolate leader,
+    // wait for re-election, commit again
+    let mut cluster = Cluster::new_raft_with_leader(5).await;
+
+    let result = cluster.propose(Payload::new(b"before-crash")).await;
+    assert_eq!(result, ProposeResult::Accepted);
+    cluster.run_to_completion(30).await;
+
+    let committed = cluster.collect_committed().await;
+    assert!(!committed.is_empty(), "should commit before leader crash");
+
+    // Crash the leader
+    cluster.set_faults(FaultConfig::new().with_isolated(NodeId(0)));
+
+    // Tick until a new leader is elected
+    let leader = cluster.wait_for_leader(300).await;
+    assert!(leader.is_some(), "new leader should be elected after crash");
+    assert_ne!(leader.unwrap(), NodeId(0), "crashed node should not be leader");
+
+    // Propose to new leader
+    let result = cluster.propose(Payload::new(b"after-reelection")).await;
+    assert_eq!(result, ProposeResult::Accepted);
+    cluster.run_to_completion(30).await;
+
+    let committed = cluster.collect_committed().await;
+    assert!(
+        !committed.is_empty(),
+        "should commit after leader re-election"
+    );
+}
+
+// ── Raft log conflict resolution ──────────────────────────────
+
+#[tokio::test]
+async fn raft_follower_catches_up_after_partition_heals() {
+    // n=3: commit values with node 2 partitioned, then heal and verify sync
+    let mut cluster = Cluster::new_raft_with_leader(3).await;
+
+    // Partition node 2
+    cluster.set_faults(FaultConfig::new().with_isolated(NodeId(2)));
+
+    // Commit 3 values — only nodes 0 and 1 will have them
+    for i in 0..3 {
+        let payload = Payload::new(format!("partitioned-{i}").into_bytes());
+        cluster.propose(payload).await;
+        cluster.run_to_completion(30).await;
+    }
+
+    let committed_during_partition = cluster.collect_committed().await;
+    // Only leader (node 0) and node 1 should have committed
+    let node2_committed = committed_during_partition.iter()
+        .find(|(id, _)| id.0 == 2);
+    assert!(node2_committed.is_none(), "partitioned node should not have committed");
+
+    // Heal the partition
+    cluster.clear_faults();
+
+    // Leader sends heartbeat on tick, which carries the entries to node 2
+    for _ in 0..20 {
+        cluster.tick().await;
+        cluster.run_to_completion(30).await;
+    }
+
+    // Now node 2 should catch up
+    let committed_after_heal = cluster.collect_committed().await;
+    let node2_after = committed_after_heal.iter()
+        .find(|(id, _)| id.0 == 2);
+
+    assert!(
+        node2_after.is_some(),
+        "node 2 should catch up after partition heals"
+    );
+
+    if let Some((_, entries)) = node2_after {
+        assert_eq!(entries.len(), 3, "node 2 should have all 3 entries after catching up");
+    }
+}

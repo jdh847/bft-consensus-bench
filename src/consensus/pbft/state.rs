@@ -265,10 +265,7 @@ impl ConsensusNode for PbftNode {
                             debug!(node = %self.id, seq = sequence, "committed");
 
                             if let Some(payload) = state.pending_payloads.remove(&sequence) {
-                                state.committed.push(CommittedEntry {
-                                    sequence,
-                                    payload,
-                                });
+                                state.committed.push(CommittedEntry { sequence, payload });
                             }
                         }
                     }
@@ -285,7 +282,8 @@ impl ConsensusNode for PbftNode {
                     return vec![];
                 }
 
-                let votes = state.view_change_votes
+                let votes = state
+                    .view_change_votes
                     .entry(new_view)
                     .or_insert_with(HashSet::new);
                 votes.insert(replica);
@@ -385,7 +383,8 @@ impl ConsensusNode for PbftNode {
             );
 
             // Vote for ourselves
-            let votes = state.view_change_votes
+            let votes = state
+                .view_change_votes
                 .entry(new_view)
                 .or_insert_with(HashSet::new);
             votes.insert(self.id);
@@ -481,6 +480,10 @@ mod tests {
         }
 
         // Should have broadcast ViewChange messages to 3 peers
-        assert_eq!(total_outgoing.len(), 3, "should broadcast ViewChange to all peers");
+        assert_eq!(
+            total_outgoing.len(),
+            3,
+            "should broadcast ViewChange to all peers"
+        );
     }
 }

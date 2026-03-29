@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
 use bft_consensus_bench::cluster::Cluster;
@@ -44,6 +42,25 @@ fn bench_raft_single_commit(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_hotstuff_single_commit(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    let mut group = c.benchmark_group("hotstuff_single_commit");
+    for n in [4, 7] {
+        group.bench_with_input(BenchmarkId::from_parameter(format!("n{n}")), &n, |b, &n| {
+            b.iter(|| {
+                rt.block_on(async {
+                    let mut cluster = Cluster::new_hotstuff(n);
+                    let result = cluster.propose(Payload::new(b"bench")).await;
+                    assert_eq!(result, ProposeResult::Accepted);
+                    cluster.run_to_completion(50).await;
+                })
+            })
+        });
+    }
+    group.finish();
+}
+
 fn bench_throughput_comparison(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let num_proposals = 100;
@@ -51,17 +68,30 @@ fn bench_throughput_comparison(c: &mut Criterion) {
     let mut group = c.benchmark_group("throughput_100_proposals");
 
     for n in [3, 5, 7] {
+        group.bench_with_input(BenchmarkId::new("pbft", format!("n{n}")), &n, |b, &n| {
+            b.iter(|| {
+                rt.block_on(async {
+                    let mut cluster = Cluster::new_pbft(n);
+                    for i in 0..num_proposals {
+                        let payload = Payload::new(format!("v{i}").into_bytes());
+                        cluster.propose(payload).await;
+                        cluster.run_to_completion(30).await;
+                    }
+                })
+            })
+        });
+
         group.bench_with_input(
-            BenchmarkId::new("pbft", format!("n{n}")),
+            BenchmarkId::new("hotstuff", format!("n{n}")),
             &n,
             |b, &n| {
                 b.iter(|| {
                     rt.block_on(async {
-                        let mut cluster = Cluster::new_pbft(n);
+                        let mut cluster = Cluster::new_hotstuff(n);
                         for i in 0..num_proposals {
                             let payload = Payload::new(format!("v{i}").into_bytes());
                             cluster.propose(payload).await;
-                            cluster.run_to_completion(30).await;
+                            cluster.run_to_completion(50).await;
                         }
                     })
                 })
@@ -69,22 +99,18 @@ fn bench_throughput_comparison(c: &mut Criterion) {
         );
 
         if n <= 5 {
-            group.bench_with_input(
-                BenchmarkId::new("raft", format!("n{n}")),
-                &n,
-                |b, &n| {
-                    b.iter(|| {
-                        rt.block_on(async {
-                            let mut cluster = Cluster::new_raft_with_leader(n).await;
-                            for i in 0..num_proposals {
-                                let payload = Payload::new(format!("v{i}").into_bytes());
-                                cluster.propose(payload).await;
-                                cluster.run_to_completion(30).await;
-                            }
-                        })
+            group.bench_with_input(BenchmarkId::new("raft", format!("n{n}")), &n, |b, &n| {
+                b.iter(|| {
+                    rt.block_on(async {
+                        let mut cluster = Cluster::new_raft_with_leader(n).await;
+                        for i in 0..num_proposals {
+                            let payload = Payload::new(format!("v{i}").into_bytes());
+                            cluster.propose(payload).await;
+                            cluster.run_to_completion(30).await;
+                        }
                     })
-                },
-            );
+                })
+            });
         }
     }
     group.finish();
@@ -93,6 +119,7 @@ fn bench_throughput_comparison(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_pbft_single_commit,
+    bench_hotstuff_single_commit,
     bench_raft_single_commit,
     bench_throughput_comparison
 );

@@ -1,7 +1,3 @@
-mod transport;
-
-pub use transport::SimulatedNetwork;
-
 use serde::{Deserialize, Serialize};
 
 use crate::types::{Digest, NodeId, Payload, SequenceNumber, ViewNumber};
@@ -22,6 +18,7 @@ pub struct NetworkMessage {
 pub enum ProtocolMessage {
     Pbft(PbftMessage),
     Raft(RaftMessage),
+    HotStuff(HotStuffMessage),
 }
 
 // ── PBFT messages ────────────────────────────────────────────
@@ -87,6 +84,49 @@ pub enum RaftMessage {
         match_index: u64,
     },
 }
+
+// ── HotStuff messages ─────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HotStuffMessage {
+    Propose {
+        view: ViewNumber,
+        sequence: SequenceNumber,
+        digest: Digest,
+        payload: Payload,
+        justify_view: ViewNumber,
+        justify_phase: HotStuffPhaseTag,
+    },
+    Vote {
+        view: ViewNumber,
+        sequence: SequenceNumber,
+        digest: Digest,
+        phase: HotStuffPhaseTag,
+        voter: NodeId,
+    },
+    QuorumCertificate {
+        view: ViewNumber,
+        sequence: SequenceNumber,
+        digest: Digest,
+        phase: HotStuffPhaseTag,
+        vote_count: usize,
+    },
+    NewView {
+        new_view: ViewNumber,
+        highest_qc_view: ViewNumber,
+        highest_qc_phase: HotStuffPhaseTag,
+        replica: NodeId,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HotStuffPhaseTag {
+    Prepare,
+    PreCommit,
+    Commit,
+}
+
+// ── Raft log entries ──────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {

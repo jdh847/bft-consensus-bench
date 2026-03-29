@@ -3,7 +3,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rand::Rng;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
@@ -40,6 +41,9 @@ struct RaftState {
     election_ticks_remaining: u64,
     heartbeat_ticks_remaining: u64,
 
+    // Deterministic RNG for election timeouts
+    rng: StdRng,
+
     // Output
     committed: Vec<CommittedEntry>,
 }
@@ -50,13 +54,17 @@ const ELECTION_TIMEOUT_MAX: u64 = 30;
 
 impl RaftNode {
     pub fn new(id: NodeId, cluster_size: usize) -> Self {
+        Self::new_seeded(id, cluster_size, StdRng::from_entropy())
+    }
+
+    /// Create a node with a deterministic RNG for reproducible election timeouts.
+    pub fn new_seeded(id: NodeId, cluster_size: usize, mut rng: StdRng) -> Self {
         let peer_ids: Vec<NodeId> = (0..cluster_size as u64)
             .map(NodeId)
             .filter(|&pid| pid != id)
             .collect();
 
-        let election_timeout = rand::thread_rng()
-            .gen_range(ELECTION_TIMEOUT_MIN..=ELECTION_TIMEOUT_MAX);
+        let election_timeout = rng.gen_range(ELECTION_TIMEOUT_MIN..=ELECTION_TIMEOUT_MAX);
 
         Self {
             id,
@@ -75,21 +83,10 @@ impl RaftNode {
                 votes_received: 0,
                 election_ticks_remaining: election_timeout,
                 heartbeat_ticks_remaining: 0,
+                rng,
                 committed: Vec::new(),
             })),
         }
-    }
-
-    /// Create a node pre-configured as leader (for testing).
-    pub fn new_as_leader(id: NodeId, cluster_size: usize) -> Self {
-        let node = Self::new(id, cluster_size);
-        // We'll force leader state after creation
-        let rt = tokio::runtime::Handle::try_current();
-        if rt.is_ok() {
-            // Can't block_on inside a runtime, so we return and let
-            // the caller set state via force_leader()
-        }
-        node
     }
 
     pub async fn force_leader(&self) {
@@ -120,7 +117,8 @@ impl RaftNode {
     }
 
     fn reset_election_timeout(state: &mut RaftState) {
-        state.election_ticks_remaining = rand::thread_rng()
+        state.election_ticks_remaining = state
+            .rng
             .gen_range(ELECTION_TIMEOUT_MIN..=ELECTION_TIMEOUT_MAX);
     }
 
@@ -129,27 +127,33 @@ impl RaftNode {
         let next = *state.next_index.get(&peer).unwrap_or(&1);
         let prev_log_index = next.saturating_sub(1);
         let prev_log_term = if prev_log_index > 0 {
-            state.log.get((prev_log_index - 1) as usize)
+            state
+                .log
+                .get((prev_log_index - 1) as usize)
                 .map(|e| e.term)
                 .unwrap_or(0)
         } else {
             0
         };
 
-        let entries: Vec<LogEntry> = state.log
+        let entries: Vec<LogEntry> = state
+            .log
             .iter()
             .skip((next - 1) as usize)
             .cloned()
             .collect();
 
-        self.msg_to(peer, ProtocolMessage::Raft(RaftMessage::AppendEntries {
-            term: state.current_term,
-            leader_id: self.id,
-            prev_log_index,
-            prev_log_term,
-            entries,
-            leader_commit: state.commit_index,
-        }))
+        self.msg_to(
+            peer,
+            ProtocolMessage::Raft(RaftMessage::AppendEntries {
+                term: state.current_term,
+                leader_id: self.id,
+                prev_log_index,
+                prev_log_term,
+                entries,
+                leader_commit: state.commit_index,
+            }),
+        )
     }
 }
 
@@ -189,7 +193,8 @@ impl ConsensusNode for RaftNode {
         state.log.push(entry);
 
         // Send AppendEntries to all followers
-        let outgoing: Vec<NetworkMessage> = self.peer_ids
+        let outgoing: Vec<NetworkMessage> = self
+            .peer_ids
             .iter()
             .map(|&peer| self.build_append_entries(&state, peer))
             .collect();
@@ -222,9 +227,9 @@ impl ConsensusNode for RaftNode {
                     state.leader_id = None;
                 }
 
-                let vote_granted = if term < state.current_term {
-                    false
-                } else if state.voted_for.is_some() && state.voted_for != Some(candidate_id) {
+                let vote_granted = if term < state.current_term
+                    || (state.voted_for.is_some() && state.voted_for != Some(candidate_id))
+                {
                     false
                 } else {
                     let our_last_term = state.log.last().map(|e| e.term).unwrap_or(0);
@@ -245,12 +250,13 @@ impl ConsensusNode for RaftNode {
                     debug!(node = %self.id, candidate = %candidate_id, term, "granted vote");
                 }
 
-                vec![self.msg_to(msg.from, ProtocolMessage::Raft(
-                    RaftMessage::RequestVoteResponse {
+                vec![self.msg_to(
+                    msg.from,
+                    ProtocolMessage::Raft(RaftMessage::RequestVoteResponse {
                         term: state.current_term,
                         vote_granted,
-                    },
-                ))]
+                    }),
+                )]
             }
 
             RaftMessage::RequestVoteResponse { term, vote_granted } => {
@@ -283,7 +289,9 @@ impl ConsensusNode for RaftNode {
                         debug!(node = %self.id, term = state.current_term, "won election, now leader");
 
                         // Send initial empty AppendEntries (heartbeat) to assert leadership
-                        return self.peer_ids.iter()
+                        return self
+                            .peer_ids
+                            .iter()
                             .map(|&peer| self.build_append_entries(&state, peer))
                             .collect();
                     }
@@ -300,13 +308,14 @@ impl ConsensusNode for RaftNode {
                 leader_commit,
             } => {
                 if term < state.current_term {
-                    return vec![self.msg_to(msg.from, ProtocolMessage::Raft(
-                        RaftMessage::AppendEntriesResponse {
+                    return vec![self.msg_to(
+                        msg.from,
+                        ProtocolMessage::Raft(RaftMessage::AppendEntriesResponse {
                             term: state.current_term,
                             success: false,
                             match_index: 0,
-                        },
-                    ))];
+                        }),
+                    )];
                 }
 
                 // Valid leader — reset election timeout
@@ -321,24 +330,26 @@ impl ConsensusNode for RaftNode {
                     let prev_entry = state.log.get((prev_log_index - 1) as usize);
                     match prev_entry {
                         None => {
-                            return vec![self.msg_to(msg.from, ProtocolMessage::Raft(
-                                RaftMessage::AppendEntriesResponse {
+                            return vec![self.msg_to(
+                                msg.from,
+                                ProtocolMessage::Raft(RaftMessage::AppendEntriesResponse {
                                     term: state.current_term,
                                     success: false,
                                     match_index: state.log.len() as u64,
-                                },
-                            ))];
+                                }),
+                            )];
                         }
                         Some(entry) if entry.term != prev_log_term => {
                             // Conflict — truncate from here
                             state.log.truncate((prev_log_index - 1) as usize);
-                            return vec![self.msg_to(msg.from, ProtocolMessage::Raft(
-                                RaftMessage::AppendEntriesResponse {
+                            return vec![self.msg_to(
+                                msg.from,
+                                ProtocolMessage::Raft(RaftMessage::AppendEntriesResponse {
                                     term: state.current_term,
                                     success: false,
                                     match_index: state.log.len() as u64,
-                                },
-                            ))];
+                                }),
+                            )];
                         }
                         _ => {}
                     }
@@ -376,13 +387,14 @@ impl ConsensusNode for RaftNode {
                     state.committed.extend(new_entries);
                 }
 
-                vec![self.msg_to(msg.from, ProtocolMessage::Raft(
-                    RaftMessage::AppendEntriesResponse {
+                vec![self.msg_to(
+                    msg.from,
+                    ProtocolMessage::Raft(RaftMessage::AppendEntriesResponse {
                         term: state.current_term,
                         success: true,
                         match_index: match_idx,
-                    },
-                ))]
+                    }),
+                )]
             }
 
             RaftMessage::AppendEntriesResponse {
@@ -414,12 +426,8 @@ impl ConsensusNode for RaftNode {
                             }
                         }
 
-                        let replicated_on = state
-                            .match_index
-                            .values()
-                            .filter(|&&mi| mi >= n)
-                            .count()
-                            + 1;
+                        let replicated_on =
+                            state.match_index.values().filter(|&&mi| mi >= n).count() + 1;
 
                         if replicated_on >= self.majority() {
                             let old = state.commit_index;
@@ -462,7 +470,9 @@ impl ConsensusNode for RaftNode {
                 // Heartbeat
                 if state.heartbeat_ticks_remaining == 0 {
                     state.heartbeat_ticks_remaining = HEARTBEAT_INTERVAL;
-                    return self.peer_ids.iter()
+                    return self
+                        .peer_ids
+                        .iter()
                         .map(|&peer| self.build_append_entries(&state, peer))
                         .collect();
                 }
@@ -487,15 +497,20 @@ impl ConsensusNode for RaftNode {
                         "election timeout, starting election"
                     );
 
-                    return self.peer_ids.iter()
-                        .map(|&peer| self.msg_to(peer, ProtocolMessage::Raft(
-                            RaftMessage::RequestVote {
-                                term: state.current_term,
-                                candidate_id: self.id,
-                                last_log_index,
-                                last_log_term,
-                            },
-                        )))
+                    return self
+                        .peer_ids
+                        .iter()
+                        .map(|&peer| {
+                            self.msg_to(
+                                peer,
+                                ProtocolMessage::Raft(RaftMessage::RequestVote {
+                                    term: state.current_term,
+                                    candidate_id: self.id,
+                                    last_log_index,
+                                    last_log_term,
+                                }),
+                            )
+                        })
                         .collect();
                 }
                 state.election_ticks_remaining -= 1;

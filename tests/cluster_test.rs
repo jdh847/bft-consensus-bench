@@ -1,5 +1,5 @@
-use bft_consensus_bench::cluster::Cluster;
 use bft_consensus_bench::cluster::fault::FaultConfig;
+use bft_consensus_bench::cluster::Cluster;
 use bft_consensus_bench::consensus::ProposeResult;
 use bft_consensus_bench::types::{NodeId, Payload};
 
@@ -22,7 +22,11 @@ async fn pbft_4_nodes_commit_single_value() {
     );
 
     for (node_id, entries) in &committed {
-        assert_eq!(entries.len(), 1, "node {node_id} should commit exactly 1 entry");
+        assert_eq!(
+            entries.len(),
+            1,
+            "node {node_id} should commit exactly 1 entry"
+        );
         assert_eq!(entries[0].payload, Payload::new(b"hello pbft"));
     }
 }
@@ -41,7 +45,8 @@ async fn pbft_7_nodes_commit_multiple_values() {
     let committed = cluster.collect_committed().await;
     assert!(!committed.is_empty());
 
-    let primary_committed = committed.iter()
+    let primary_committed = committed
+        .iter()
         .find(|(id, _)| id.0 == 0)
         .map(|(_, entries)| entries);
 
@@ -71,7 +76,10 @@ async fn raft_leader_election_from_scratch() {
     let mut cluster = Cluster::new_raft(3);
 
     let leader = cluster.wait_for_leader(200).await;
-    assert!(leader.is_some(), "a leader should be elected within 200 ticks");
+    assert!(
+        leader.is_some(),
+        "a leader should be elected within 200 ticks"
+    );
 
     let result = cluster.propose(Payload::new(b"after election")).await;
     assert_eq!(result, ProposeResult::Accepted);
@@ -79,10 +87,7 @@ async fn raft_leader_election_from_scratch() {
     cluster.run_to_completion(20).await;
 
     let committed = cluster.collect_committed().await;
-    assert!(
-        !committed.is_empty(),
-        "should commit after leader election"
-    );
+    assert!(!committed.is_empty(), "should commit after leader election");
 }
 
 // ── Fault injection ───────────────────────────────────────────
@@ -91,9 +96,7 @@ async fn raft_leader_election_from_scratch() {
 async fn pbft_tolerates_one_isolated_node_in_4_node_cluster() {
     // n=4, f=1 — should still commit with 1 node isolated
     let mut cluster = Cluster::new_pbft(4);
-    cluster.set_faults(
-        FaultConfig::new().with_isolated(NodeId(3))
-    );
+    cluster.set_faults(FaultConfig::new().with_isolated(NodeId(3)));
 
     let result = cluster.propose(Payload::new(b"fault test")).await;
     assert_eq!(result, ProposeResult::Accepted);
@@ -118,7 +121,7 @@ async fn pbft_fails_with_two_isolated_in_4_node_cluster() {
     cluster.set_faults(
         FaultConfig::new()
             .with_isolated(NodeId(2))
-            .with_isolated(NodeId(3))
+            .with_isolated(NodeId(3)),
     );
 
     let result = cluster.propose(Payload::new(b"should fail")).await;
@@ -140,7 +143,7 @@ async fn raft_survives_minority_partition() {
     cluster.set_faults(
         FaultConfig::new()
             .with_isolated(NodeId(3))
-            .with_isolated(NodeId(4))
+            .with_isolated(NodeId(4)),
     );
 
     let result = cluster.propose(Payload::new(b"partition test")).await;
@@ -158,9 +161,7 @@ async fn raft_survives_minority_partition() {
 #[tokio::test]
 async fn cluster_stats_track_dropped_messages() {
     let mut cluster = Cluster::new_pbft(4);
-    cluster.set_faults(
-        FaultConfig::new().with_isolated(NodeId(3))
-    );
+    cluster.set_faults(FaultConfig::new().with_isolated(NodeId(3)));
 
     cluster.propose(Payload::new(b"stats test")).await;
     cluster.run_to_completion(20).await;
@@ -188,7 +189,10 @@ async fn pbft_view_change_after_primary_isolated() {
     cluster.run_to_completion(30).await;
 
     let committed = cluster.collect_committed().await;
-    assert!(!committed.is_empty(), "should commit before primary failure");
+    assert!(
+        !committed.is_empty(),
+        "should commit before primary failure"
+    );
 
     // Now isolate the primary
     cluster.set_faults(FaultConfig::new().with_isolated(NodeId(0)));
@@ -202,7 +206,11 @@ async fn pbft_view_change_after_primary_isolated() {
 
     // Try to propose to the new primary
     let result = cluster.propose(Payload::new(b"after-view-change")).await;
-    assert_eq!(result, ProposeResult::Accepted, "new primary should accept proposals");
+    assert_eq!(
+        result,
+        ProposeResult::Accepted,
+        "new primary should accept proposals"
+    );
 
     cluster.run_to_completion(50).await;
 
@@ -232,7 +240,11 @@ async fn raft_reelection_after_leader_crash() {
     // Tick until a new leader is elected
     let leader = cluster.wait_for_leader(300).await;
     assert!(leader.is_some(), "new leader should be elected after crash");
-    assert_ne!(leader.unwrap(), NodeId(0), "crashed node should not be leader");
+    assert_ne!(
+        leader.unwrap(),
+        NodeId(0),
+        "crashed node should not be leader"
+    );
 
     // Propose to new leader
     let result = cluster.propose(Payload::new(b"after-reelection")).await;
@@ -265,9 +277,11 @@ async fn raft_follower_catches_up_after_partition_heals() {
 
     let committed_during_partition = cluster.collect_committed().await;
     // Only leader (node 0) and node 1 should have committed
-    let node2_committed = committed_during_partition.iter()
-        .find(|(id, _)| id.0 == 2);
-    assert!(node2_committed.is_none(), "partitioned node should not have committed");
+    let node2_committed = committed_during_partition.iter().find(|(id, _)| id.0 == 2);
+    assert!(
+        node2_committed.is_none(),
+        "partitioned node should not have committed"
+    );
 
     // Heal the partition
     cluster.clear_faults();
@@ -280,8 +294,7 @@ async fn raft_follower_catches_up_after_partition_heals() {
 
     // Now node 2 should catch up
     let committed_after_heal = cluster.collect_committed().await;
-    let node2_after = committed_after_heal.iter()
-        .find(|(id, _)| id.0 == 2);
+    let node2_after = committed_after_heal.iter().find(|(id, _)| id.0 == 2);
 
     assert!(
         node2_after.is_some(),
@@ -289,6 +302,10 @@ async fn raft_follower_catches_up_after_partition_heals() {
     );
 
     if let Some((_, entries)) = node2_after {
-        assert_eq!(entries.len(), 3, "node 2 should have all 3 entries after catching up");
+        assert_eq!(
+            entries.len(),
+            3,
+            "node 2 should have all 3 entries after catching up"
+        );
     }
 }

@@ -1,3 +1,4 @@
+pub mod hotstuff;
 pub mod pbft;
 pub mod raft;
 

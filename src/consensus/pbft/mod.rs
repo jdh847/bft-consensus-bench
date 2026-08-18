@@ -2,7 +2,9 @@ mod state;
 
 pub use state::PbftNode;
 
-use crate::types::{SequenceNumber, ViewNumber};
+use std::collections::HashSet;
+
+use crate::types::{NodeId, SequenceNumber, ViewNumber};
 
 /// PBFT phase for a given sequence number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,8 +25,8 @@ pub struct SlotState {
     pub view: ViewNumber,
     pub sequence: SequenceNumber,
     pub phase: Phase,
-    pub prepare_count: usize,
-    pub commit_count: usize,
+    pub prepare_voters: HashSet<NodeId>,
+    pub commit_voters: HashSet<NodeId>,
 }
 
 impl SlotState {
@@ -33,8 +35,8 @@ impl SlotState {
             view,
             sequence,
             phase: Phase::Idle,
-            prepare_count: 0,
-            commit_count: 0,
+            prepare_voters: HashSet::new(),
+            commit_voters: HashSet::new(),
         }
     }
 }

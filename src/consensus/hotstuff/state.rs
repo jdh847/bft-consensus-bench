@@ -132,7 +132,7 @@ impl ConsensusNode for HotStuffNode {
 
         let mut slot = SlotState::new(view, seq);
         slot.phase = Phase::Prepare;
-        slot.prepare_votes = 1; // self-vote
+        slot.prepare_voters.insert(self.id); // self-vote
         state.slots.insert(seq, slot);
         state.pending_payloads.insert(seq, payload.clone());
 
@@ -211,7 +211,7 @@ impl ConsensusNode for HotStuffNode {
                 sequence,
                 digest,
                 phase,
-                voter: _,
+                voter,
             } => {
                 // Only leader processes votes
                 if self.leader_for_view(view) != self.id {
@@ -224,7 +224,7 @@ impl ConsensusNode for HotStuffNode {
 
                 let quorum = self.quorum();
 
-                // Extract slot info, update counts, then decide what to broadcast.
+                // Extract slot info, update voter sets, then decide what to broadcast.
                 // Two-phase access avoids double-mutable-borrow on `state`.
                 let action = {
                     let slot = match state.slots.get_mut(&sequence) {
@@ -236,11 +236,11 @@ impl ConsensusNode for HotStuffNode {
                             if slot.phase != Phase::Prepare {
                                 return vec![];
                             }
-                            slot.prepare_votes += 1;
-                            if slot.prepare_votes >= quorum {
+                            slot.prepare_voters.insert(voter);
+                            let vc = slot.prepare_voters.len();
+                            if vc >= quorum {
                                 slot.phase = Phase::PreCommit;
-                                slot.precommit_votes = 1;
-                                let vc = slot.prepare_votes;
+                                slot.precommit_voters.insert(self.id); // leader self-vote
                                 debug!(
                                     node = %self.id, seq = sequence, votes = vc,
                                     "PrepareQC formed, broadcasting"
@@ -254,11 +254,11 @@ impl ConsensusNode for HotStuffNode {
                             if slot.phase != Phase::PreCommit {
                                 return vec![];
                             }
-                            slot.precommit_votes += 1;
-                            if slot.precommit_votes >= quorum {
+                            slot.precommit_voters.insert(voter);
+                            let vc = slot.precommit_voters.len();
+                            if vc >= quorum {
                                 slot.phase = Phase::Commit;
-                                slot.commit_votes = 1;
-                                let vc = slot.precommit_votes;
+                                slot.commit_voters.insert(self.id); // leader self-vote
                                 debug!(
                                     node = %self.id, seq = sequence, votes = vc,
                                     "PreCommitQC formed, broadcasting"
@@ -272,10 +272,10 @@ impl ConsensusNode for HotStuffNode {
                             if slot.phase != Phase::Commit {
                                 return vec![];
                             }
-                            slot.commit_votes += 1;
-                            if slot.commit_votes >= quorum {
+                            slot.commit_voters.insert(voter);
+                            let vc = slot.commit_voters.len();
+                            if vc >= quorum {
                                 slot.phase = Phase::Decided;
-                                let vc = slot.commit_votes;
                                 debug!(node = %self.id, seq = sequence, "CommitQC formed, committed");
                                 Some((HotStuffPhaseTag::Commit, vc, true))
                             } else {
@@ -312,8 +312,17 @@ impl ConsensusNode for HotStuffNode {
                 sequence,
                 digest,
                 phase,
-                vote_count: _,
+                vote_count,
             } => {
+                // Reject QCs that don't claim enough votes
+                if vote_count < self.quorum() {
+                    warn!(
+                        node = %self.id, seq = sequence, vote_count,
+                        quorum = self.quorum(), "rejecting QC with insufficient vote count"
+                    );
+                    return vec![];
+                }
+
                 // Update highest QC tracking
                 if view > state.highest_qc_view
                     || (view == state.highest_qc_view

@@ -51,6 +51,8 @@ struct RaftState {
 const HEARTBEAT_INTERVAL: u64 = 5;
 const ELECTION_TIMEOUT_MIN: u64 = 15;
 const ELECTION_TIMEOUT_MAX: u64 = 30;
+/// Sentinel value for "no leader". Safe because valid NodeIds are 0..cluster_size (always << u64::MAX).
+const NO_LEADER: u64 = u64::MAX;
 
 impl RaftNode {
     pub fn new(id: NodeId, cluster_size: usize) -> Self {
@@ -70,7 +72,7 @@ impl RaftNode {
             id,
             cluster_size,
             peer_ids,
-            leader_id_atomic: AtomicU64::new(u64::MAX),
+            leader_id_atomic: AtomicU64::new(NO_LEADER),
             state: Arc::new(Mutex::new(RaftState {
                 current_term: 0,
                 voted_for: None,
@@ -526,7 +528,7 @@ impl ConsensusNode for RaftNode {
 
     fn leader(&self) -> Option<NodeId> {
         let id = self.leader_id_atomic.load(Ordering::Relaxed);
-        if id == u64::MAX {
+        if id == NO_LEADER {
             None
         } else {
             Some(NodeId(id))

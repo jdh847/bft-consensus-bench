@@ -212,7 +212,7 @@ impl ConsensusNode for PbftNode {
                 view,
                 sequence,
                 digest,
-                replica: _,
+                replica,
             } => {
                 if view != state.view {
                     return vec![];
@@ -220,14 +220,14 @@ impl ConsensusNode for PbftNode {
 
                 if let Some(slot) = state.slots.get_mut(&sequence) {
                     if slot.phase == Phase::PrePrepared {
-                        slot.prepare_count += 1;
+                        slot.prepare_voters.insert(replica);
 
-                        if slot.prepare_count >= self.prepare_threshold() {
+                        if slot.prepare_voters.len() >= self.prepare_threshold() {
                             slot.phase = Phase::Prepared;
-                            slot.commit_count = 1; // count own commit
+                            slot.commit_voters.insert(self.id); // count own commit
                             debug!(
                                 node = %self.id, seq = sequence,
-                                prepares = slot.prepare_count,
+                                prepares = slot.prepare_voters.len(),
                                 "reached prepare threshold, broadcasting commit"
                             );
 
@@ -247,7 +247,7 @@ impl ConsensusNode for PbftNode {
                 view,
                 sequence,
                 digest: _,
-                replica: _,
+                replica,
             } => {
                 if view != state.view {
                     return vec![];
@@ -255,9 +255,11 @@ impl ConsensusNode for PbftNode {
 
                 if let Some(slot) = state.slots.get_mut(&sequence) {
                     if slot.phase == Phase::Prepared || slot.phase == Phase::PrePrepared {
-                        slot.commit_count += 1;
+                        slot.commit_voters.insert(replica);
 
-                        if slot.commit_count >= self.quorum() && slot.phase != Phase::Committed {
+                        if slot.commit_voters.len() >= self.quorum()
+                            && slot.phase != Phase::Committed
+                        {
                             slot.phase = Phase::Committed;
                             if sequence > state.highest_committed_seq {
                                 state.highest_committed_seq = sequence;

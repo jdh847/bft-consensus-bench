@@ -2,7 +2,9 @@ mod state;
 
 pub use state::HotStuffNode;
 
-use crate::types::{SequenceNumber, ViewNumber};
+use std::collections::HashSet;
+
+use crate::types::{NodeId, SequenceNumber, ViewNumber};
 
 /// HotStuff consensus phase for a given sequence number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,9 +27,9 @@ pub struct SlotState {
     pub view: ViewNumber,
     pub sequence: SequenceNumber,
     pub phase: Phase,
-    pub prepare_votes: usize,
-    pub precommit_votes: usize,
-    pub commit_votes: usize,
+    pub prepare_voters: HashSet<NodeId>,
+    pub precommit_voters: HashSet<NodeId>,
+    pub commit_voters: HashSet<NodeId>,
 }
 
 impl SlotState {
@@ -36,9 +38,9 @@ impl SlotState {
             view,
             sequence,
             phase: Phase::Idle,
-            prepare_votes: 0,
-            precommit_votes: 0,
-            commit_votes: 0,
+            prepare_voters: HashSet::new(),
+            precommit_voters: HashSet::new(),
+            commit_voters: HashSet::new(),
         }
     }
 }

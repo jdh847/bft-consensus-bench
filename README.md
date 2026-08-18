@@ -1,5 +1,9 @@
 # bft-consensus-bench
 
+[![CI](https://github.com/jdh847/bft-consensus-bench/actions/workflows/ci.yml/badge.svg)](https://github.com/jdh847/bft-consensus-bench/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/jdh847/bft-consensus-bench?color=E8630A)](https://github.com/jdh847/bft-consensus-bench/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue)](LICENSE)
+
 Benchmarking framework for comparing three consensus protocols — PBFT, HotStuff, and Raft — under identical workloads.
 
 ## Why
